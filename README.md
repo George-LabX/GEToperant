@@ -1,89 +1,75 @@
-# GEToperant
-A General Extraction Tool for Med-PC data. GEToperant will export data from your Med-PC data files. It will produce an Excel file with the data labelled according to any custom profile.
+# MedAssociate Parser — George Lab
 
-# How to Use GEToperant
+A browser-based tool for extracting and organizing raw Med-PC / MedAssociate behavioral data files into clean CSV outputs. No installation required — open the HTML file directly in any browser.
 
-Using GEToperant involves four steps.
-1. Create a data profile
-2. Use the checkboxes to select which headers you wish to export
-3. Click on the button that corresponds to the output you want
-4. Follow the prompts to select your data profile and files
+## Features
 
-Your data profile tells GEToperant what data you want extracted and what to label each element as. You can extract:
-* A single element
-* A section of an array
-* A whole array
+- **Drag & drop** raw Med-PC text files (one file per session day, multiple rats per file)
+- **Auto-detects** session type from filename (FR, PR, Shock) — overridable manually
+- **Auto-detects** session duration from Start/End Time fields
+- **Live reward chart** with adjustable bin size, shown immediately after upload
+- **Two CSV outputs:**
+  - `timestamps_matrix.csv` — variables as rows, rats as columns (matches GEToperant Excel format)
+  - `binned_data.csv` — rats as rows, time-binned counts as columns
+- **Session type support:**
+  - FR (fixed ratio) — SHA / LGA sessions
+  - PR (progressive ratio) — includes PR breakpoint (last ratio)
+  - Shock — includes total shocks and shock-at-reward timestamps
 
-You can also use MPC2XL Row Profiles (MRPs) to extract your data or convert an MRP to an GEToperant profile.
+## Quick start
 
-Your data profile needs to have up to 7 pieces of information:
-1. A Label
-2. A Label Start Value
-3. A Label Increment
-4. An Array or Variable
-5. The Start Element
-6. The Increment Element
-7. The Stop Element
+1. Download `medassociate_parser.html`
+2. Double-click to open in your browser
+3. Drop your raw Med-PC file(s) onto the upload area
+4. Select session type (auto-detected from filename)
+5. Review the live reward chart
+6. Click **Generate CSV files** and download
 
-In order to extract a single element you will need to define:
-* The Label
-* The Array or Variable
-* The Start Element (i.e. the element you want extracted)
-* The Increment Element (which must equal 0)
+## Array mapping (GWAS programs)
 
-For example, the element A(0) contains the total lever responses. You would define the label as 'Lever Presses', the Array as 'A', the Start Element as 0 and the Increment Element as 0. This tells GEToperant to get the element A(0) from all sessions in the data files you load and to label it 'Lever Presses'.
+| Variable | Array | Type |
+|---|---|---|
+| Reward timestamps | V | multi-value |
+| Active timestamps | Y | multi-value |
+| Inactive timestamps | U | multi-value |
+| Total rewards | B[0] | scalar |
+| Total active presses | G[0] | scalar |
+| Total inactive presses | A[0] | scalar |
+| PR breakpoint | S[0] | scalar (PR only) |
+| Shock at reward # | M | multi-value (Shock only) |
+| Total shocks | T[0] | scalar (Shock only) |
 
-In order to extract a section of an array you need:
-* The label
-* The Array or Variable
-* The Start Element
-* The Increment Element
-* The Stop Element
-You can also use:
-* The Label Start Value
-* The Label Increment
+All array assignments are configurable in the interface.
 
-Your Stop Element must be greater than your Start Element and your Increment Element must be greater than 0. This will tell GEToperant to start at a particular part of the array and keep going up by the increments you define until it reaches the Stop Element. So if you wanted every second value of the B array from beginning to element 30, you would set the Start Element to 0, the Incremenet Element to 2 and the Stop Element to 30.
+## File naming convention for auto-detection
 
-The Label Increment and Label Start Value are optional and allow you to define a value to put at the end of your label. This is useful for a series like timebins. For example, you could have a label of 'Responses Min' with a Label Start Value of 1 and a Label Increment of 1. You would then get 'Responses Min 1', 'Responses Min 2', 'Responses Min 3' and so on.
+| Pattern in filename | Session type |
+|---|---|
+| `SHA`, `LGA` | FR (fixed ratio) |
+| `PR`, `COCPR` | Progressive ratio |
+| `PRESHOCK`, `SHOCK` | Shock session |
 
-In order to extract an array until it ends you will need the same details as required to extract a section of an array except you should leave the Stop Element blank or write something in it, such as 'End'. However, any text string will be read as the end of the array.
+## Contributing
 
-Session comments are not extracted automatically. In order to extract comments provide:
-* The Label
-* An Array or Variable with the word 'comment' in it (this is not case sensitive)
-* A Start Element and Increment Element of 0
+Pull requests welcome. To suggest changes:
 
-Once you have your data profile, you can select your headers.
-All headers are selected by default.
+1. Fork this repository
+2. Create a feature branch: `git checkout -b my-improvement`
+3. Commit your changes and open a pull request
 
-You can export your data as:
-1. A single worksheet
-2. Separate sheets
-3. Separate books
+For bugs or feature requests, open an [issue](https://github.com/George-LabX/GEToperant/issues).
 
-Click on the button corresponding to the type of output you want and GEToperant will display windows to select the appropriate files.
+## Citation
 
-For a single worksheet, GEToperant will save all data to one sheet on one Excel file.
+If you use this tool in your research, please cite:
 
-For separate sheets, GEToperant will save each data file in a separate worksheet, but in one Excel file.
+> George Lab (2025). MedAssociate Parser. George-LabX/GEToperant. https://github.com/George-LabX/GEToperant
 
-For separate books, GEToperant will save each data file in a separate Excel file, named after the file that it corresponds to.
+## Related
 
-# Feature requests, bugs and issues
+- [GEToperant](https://github.com/SKhoo/GEToperant) — original Python/Excel-based tool this replaces
+- [MedParse](https://github.com/George-LabX/MedParse) — Python/MATLAB parser
 
-GEToperant is pretty stable. No new features are anticipated.
+## License
 
-Please feel free to contact me with bugs or raise an issue against this repository.
-
-# Citations are welcome!
-
-Khoo, S. Y. (2021). GEToperant: A General Extraction Tool for Med-PC Data. Figshare. doi: 10.6084/m9.figshare.13697851
-
-# Acknowledgements
-
-GEToperant was made possible thanks to the developers behind Python 3 and the following packages: openpyxl, xlrd, xlsxwriter, pyinstaller and py2app.
-
-# License
-
-GEToperant is free software distributed under an MIT license. You can modify it in any way you like, but there is absolutely no warranty. Please distribute widely to anyone who might find it useful!
+MIT

@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MedAssociate Parser — George Lab</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;background:#f5f5f7;color:#1d1d1f;min-height:100vh;padding:24px 16px}
+#root{max-width:620px;margin:0 auto}
+button{font-family:inherit;cursor:pointer;transition:opacity 0.1s}
+button:disabled{cursor:not-allowed}
+select,input[type=number]{font-family:inherit;outline:none}
+input[type=number]::-webkit-inner-spin-button{opacity:1}
+canvas{border-radius:0}
+</style>
+</head>
+<body>
+<div id="root"><div style="padding:40px;text-align:center;color:#888">Loading parser...</div></div>
+<script type="text/babel" data-presets="react">
+const{useState,useRef,useCallback,useEffect}=React;
+
+const SESSION_TYPES={
+  FR:{label:"FR — Fixed ratio (SHA / LGA)",color:"#1D9E75",bg:"#E1F5EE",border:"#9FE1CB",text:"#085041"},
+  PR:{label:"PR — Progressive ratio",color:"#185FA5",bg:"#E6F1FB",border:"#B5D4F4",text:"#0C447C"},
+  SHOCK:{label:"Shock session",color:"#D85A30",bg:"#FAECE7",border:"#F5C4B3",text:"#4A1B0C"},
+};
+
+function detectSessionType(filename){
+  const f=(filename||"").toUpperCase();
+  if(/PRESHOCK|SHOCK/.test(f))return"SHOCK";
+  if(/COCPR|_PR[0-9]|HSPRO|GWASPR/.test(f))return"PR";
+  if(/SHA|LGA/.test(f))return"FR";
+  return null;
+}
+
+const META_KEYS_ORDERED=["Filename","Start Date","End Date","Subject","Experiment","Group","Box","Start Time","End Time","MSN"];
+
+function parseTimeToMinutes(t){
+  if(!t)return null;
+  const p=t.trim().split(":").map(Number);
+  if(p.length===3&&p.every(x=>!isNaN(x)))return p[0]*60+p[1]+p[2]/60;
+  if(p.length===2&&p.every(x=>!isNaN(x)))return p[0]*60+p[1];
+  return null;
+}
+
+function parseMedFile(text,filename){
+  const lines=text.split(/\r?\n/);
+  const sessions=[];let i=0;
+  while(i<lines.length){
+    while(i<lines.length&&lines[i].trim()==="")i++;
+    if(i>=lines.length)break;
+    const session={meta:{Filename:filename},arrays:{}};
+    let currentArray=null;
+    while(i<lines.length){
+      const line=lines[i].trim();
+      if(line===""){i++;break;}
+      const indexedMatch=line.match(/^(\d+):\s+(.+)$/);
+      if(indexedMatch&&currentArray!==null){
+        const vals=indexedMatch[2].trim().split(/\s+/).map(Number).filter(n=>!isNaN(n));
+        session.arrays[currentArray].push(...vals);i++;continue;
+      }
+      const scalarMatch=line.match(/^([A-Z]):\s+([-\d.]+)$/);
+      if(scalarMatch){
+        currentArray=null;
+        session.arrays[scalarMatch[1]]=[parseFloat(scalarMatch[2])];i++;continue;
+      }
+      const arrayHeaderMatch=line.match(/^([A-Z]):$/);
+      if(arrayHeaderMatch){
+        currentArray=arrayHeaderMatch[1];
+        session.arrays[currentArray]=session.arrays[currentArray]||[];i++;continue;
+      }
+      const colonIdx=line.indexOf(":");
+      if(colonIdx!==-1){
+        currentArray=null;
+        const key=line.slice(0,colonIdx).trim();
+        const val=line.slice(colonIdx+1).trim();
+        const knownMeta=["File","Start Date","End Date","Subject","Experiment","Group","Box","Start Time","End Time","MSN"];
+        if(knownMeta.some(k=>key===k||key.startsWith(k)))session.meta[key==="File"?"Filename":key]=val;
+      }
+      i++;
+    }
+    if(Object.keys(session.meta).length>1||Object.keys(session.arrays).length>0)sessions.push(session);
+  }
+  return sessions;
+}
+
+function detectSessionDuration(sessions){
+  for(const s of sessions){
+    const start=parseTimeToMinutes(s.meta["Start Time"]);
+    const end=parseTimeToMinutes(s.meta["End Time"]);
+    if(start!==null&&end!==null){let dur=end-start;if(dur<0)dur+=1440;if(dur>0)return Math.round(dur);}
+  }
+  return null;
+}
+
+function stripTrailingZeros(arr){let end=arr.length;while(end>0&&arr[end-1]===0)end--;return arr.slice(0,end);}
+function getRatId(s){const subj=(s.meta["Subject"]||"").trim();return(subj&&subj!=="0")?subj:`Box${(s.meta["Box"]||"").trim()}`;}
+function scalarVal(s,k){const v=(s.arrays[k]||[])[0];return(v!=null&&!isNaN(v))?v:"";}
+
+function buildTimestampMatrix(sessions,cfg,sessionType){
+  const{rewardArray,activeArray,inactiveArray,rewardScalarArray,activeScalarArray,inactiveScalarArray,breakpointArray,shockAtRewardArray,totalShocksArray}=cfg;
+  const ratHeaders=sessions.map(s=>getRatId(s));
+  const activeTs=sessions.map(s=>stripTrailingZeros(s.arrays[activeArray]||[]));
+  const inactiveTs=sessions.map(s=>stripTrailingZeros(s.arrays[inactiveArray]||[]));
+  const rewardTs=sessions.map(s=>stripTrailingZeros(s.arrays[rewardArray]||[]));
+  const shockTs=sessionType==="SHOCK"?sessions.map(s=>stripTrailingZeros(s.arrays[shockAtRewardArray]||[]).filter(x=>x>0)):null;
+  const maxActive=Math.max(0,...activeTs.map(a=>a.length));
+  const maxInactive=Math.max(0,...inactiveTs.map(a=>a.length));
+  const maxReward=Math.max(0,...rewardTs.map(a=>a.length));
+  const maxShock=shockTs?Math.max(0,...shockTs.map(a=>a.length)):0;
+  const header=["Variable",...ratHeaders];
+  const rows=[header];
+  for(const key of META_KEYS_ORDERED)rows.push([key,...sessions.map(s=>s.meta[key]??"")]);
+  rows.push(["FR",...sessions.map(s=>scalarVal(s,"F"))]);
+  rows.push(["Active Lever Presses",...sessions.map(s=>scalarVal(s,activeScalarArray))]);
+  rows.push(["Inactive Lever Presses",...sessions.map(s=>scalarVal(s,inactiveScalarArray))]);
+  rows.push(["Reward",...sessions.map(s=>scalarVal(s,rewardScalarArray))]);
+  if(sessionType==="PR"&&breakpointArray)rows.push(["PR Breakpoint (last ratio)",...sessions.map(s=>scalarVal(s,breakpointArray))]);
+  if(sessionType==="SHOCK"&&totalShocksArray)rows.push(["Total Shocks",...sessions.map(s=>scalarVal(s,totalShocksArray))]);
+  for(let idx=0;idx<maxActive;idx++)rows.push([`Active ${idx+1}`,...activeTs.map(arr=>idx<arr.length?(arr[idx]===0?"":arr[idx]):"")]);
+  for(let idx=0;idx<maxInactive;idx++)rows.push([`Inactive ${idx+1}`,...inactiveTs.map(arr=>idx<arr.length?(arr[idx]===0?"":arr[idx]):"")]);
+  for(let idx=0;idx<maxReward;idx++)rows.push([`Reward ${idx+1}`,...rewardTs.map(arr=>idx<arr.length?(arr[idx]===0?"":arr[idx]):"")]);
+  if(sessionType==="SHOCK"&&shockTs)for(let idx=0;idx<maxShock;idx++)rows.push([`Shock at reward # ${idx+1}`,...shockTs.map(arr=>idx<arr.length?arr[idx]:"")]);
+  return rows;
+}
+
+function buildBinsMatrix(sessions,cfg,sessionType,binSizeMin,sessionDurMin){
+  const{rewardArray,activeArray,inactiveArray,breakpointArray,totalShocksArray}=cfg;
+  const binSec=binSizeMin*60,sessSec=sessionDurMin*60;
+  const nBins=Math.ceil(sessSec/binSec);
+  const binned=ts=>{const b=Array(nBins).fill(0);for(const t of ts){if(t>0){const i=Math.floor((t-0.001)/binSec);if(i>=0&&i<nBins)b[i]++;}}return b;};
+  const bNums=Array.from({length:nBins},(_,i)=>i+1);
+  const extraH=[];
+  if(sessionType==="PR")extraH.push("PR Breakpoint (last ratio)");
+  if(sessionType==="SHOCK")extraH.push("Total Shocks");
+  const header=[...META_KEYS_ORDERED,"Total Rewards","Total Active","Total Inactive",...extraH,...bNums.map(b=>`Reward_bin_${b}`),...bNums.map(b=>`Active_bin_${b}`),...bNums.map(b=>`Inactive_bin_${b}`)];
+  const rows=[header];
+  for(const s of sessions){
+    const rT=stripTrailingZeros(s.arrays[rewardArray]||[]).filter(x=>x>0);
+    const aT=stripTrailingZeros(s.arrays[activeArray]||[]).filter(x=>x>0);
+    const nT=stripTrailingZeros(s.arrays[inactiveArray]||[]).filter(x=>x>0);
+    const eV=[];
+    if(sessionType==="PR")eV.push(scalarVal(s,breakpointArray));
+    if(sessionType==="SHOCK")eV.push(scalarVal(s,totalShocksArray));
+    rows.push([...META_KEYS_ORDERED.map(k=>k==="Subject"?getRatId(s):(s.meta[k]??"")),rT.length,aT.length,nT.length,...eV,...binned(rT),...binned(aT),...binned(nT)]);
+  }
+  return rows;
+}
+
+function toCSV(rows){const e=v=>{const s=String(v??"");return(s.includes(",")||s.includes('"')||s.includes("\n"))?`"${s.replace(/"/g,'""')}"`:`${s}`;};return rows.map(r=>r.map(e).join(",")).join("\n");}
+
+function triggerDownload(csvString,filename){
+  const blob=new Blob([csvString],{type:"text/csv;charset=utf-8;"});
+  const reader=new FileReader();
+  reader.onload=()=>{const a=document.createElement("a");a.href=reader.result;a.download=filename;a.style.display="none";document.body.appendChild(a);a.click();setTimeout(()=>document.body.removeChild(a),300);};
+  reader.readAsDataURL(blob);
+}
+
+function formatDur(min){const h=Math.floor(min/60),m=Math.round(min%60);return h>0?(m>0?`${h}h ${m}min`:`${h}h`):`${m}min`;}
+
+const LINE_COLORS=["#1D9E75","#185FA5","#D85A30","#7F77DD","#BA7517","#D4537E","#5DCAA5","#639922","#E24B4A","#85B7EB","#0F6E56","#534AB7","#993C1D","#EF9F27","#3C3489","#888780"];
+const ARRAYS_DEFAULT=["V","Y","U","A","B","G","M","S","T","W","R","L","H"];
+
+function RewardChart({sessions,rewardArray,sesMin,vizBinMin}){
+  const canvasRef=useRef(null);
+  const nBins=Math.ceil(Number(sesMin)/Number(vizBinMin));
+  useEffect(()=>{
+    const canvas=canvasRef.current;if(!canvas||sessions.length===0)return;
+    const ctx=canvas.getContext("2d");
+    const dpr=window.devicePixelRatio||1;
+    const rect=canvas.getBoundingClientRect();
+    canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;
+    ctx.scale(dpr,dpr);
+    const W=rect.width,H=rect.height;
+    const pad={top:18,right:22,bottom:48,left:46};
+    const plotW=W-pad.left-pad.right,plotH=H-pad.top-pad.bottom;
+    ctx.clearRect(0,0,W,H);
+    const seriesData=sessions.map(s=>{
+      const ts=stripTrailingZeros(s.arrays[rewardArray]||[]).filter(x=>x>0);
+      const bins=Array(nBins).fill(0);
+      for(const t of ts){const i=Math.floor((t-0.001)/(Number(vizBinMin)*60));if(i>=0&&i<nBins)bins[i]++;}
+      return{label:getRatId(s),bins};
+    });
+    const maxVal=Math.max(1,...seriesData.flatMap(s=>s.bins));
+    const step=maxVal<=5?1:maxVal<=10?2:maxVal<=30?5:10;
+    const yMax=Math.ceil(maxVal/step)*step;
+    const yTicks=[];for(let v=0;v<=yMax;v+=step)yTicks.push(v);
+    const xOf=b=>pad.left+(b+0.5)*(plotW/nBins);
+    const yOf=v=>pad.top+plotH-(v/yMax)*plotH;
+    ctx.strokeStyle="rgba(128,128,128,0.1)";ctx.lineWidth=1;
+    for(const v of yTicks){ctx.beginPath();ctx.moveTo(pad.left,yOf(v));ctx.lineTo(pad.left+plotW,yOf(v));ctx.stroke();}
+    ctx.strokeStyle="rgba(128,128,128,0.25)";ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(pad.left,pad.top);ctx.lineTo(pad.left,pad.top+plotH);ctx.lineTo(pad.left+plotW,pad.top+plotH);ctx.stroke();
+    ctx.fillStyle="rgba(110,110,110,0.9)";ctx.font="10px -apple-system,sans-serif";ctx.textAlign="right";
+    for(const v of yTicks)ctx.fillText(String(v),pad.left-5,yOf(v)+3);
+    ctx.textAlign="center";
+    const xStep=nBins<=12?1:nBins<=36?3:nBins<=72?6:12;
+    for(let b=0;b<nBins;b+=xStep)ctx.fillText(`${(b+1)*Number(vizBinMin)}`,xOf(b),pad.top+plotH+13);
+    ctx.fillStyle="rgba(100,100,100,0.8)";ctx.font="10px -apple-system,sans-serif";ctx.textAlign="center";
+    ctx.fillText("Time (min)",pad.left+plotW/2,H-3);
+    ctx.save();ctx.translate(11,pad.top+plotH/2);ctx.rotate(-Math.PI/2);ctx.fillText("Rewards / bin",0,0);ctx.restore();
+    seriesData.forEach((series,si)=>{
+      const color=LINE_COLORS[si%LINE_COLORS.length];
+      ctx.strokeStyle=color;ctx.lineWidth=1.8;ctx.lineJoin="round";
+      ctx.beginPath();series.bins.forEach((v,b)=>b===0?ctx.moveTo(xOf(b),yOf(v)):ctx.lineTo(xOf(b),yOf(v)));ctx.stroke();
+      ctx.fillStyle=color;series.bins.forEach((v,b)=>{ctx.beginPath();ctx.arc(xOf(b),yOf(v),2.2,0,Math.PI*2);ctx.fill();});
+    });
+  },[sessions,rewardArray,sesMin,vizBinMin,nBins]);
+  if(!sessions.length)return null;
+  return(
+    <div>
+      <canvas ref={canvasRef} style={{width:"100%",height:"210px",display:"block"}}/>
+      <div style={{display:"flex",flexWrap:"wrap",gap:"6px",padding:"8px 14px",borderTop:"1px solid #e5e5ea"}}>
+        {sessions.map((s,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:"5px"}}>
+            <div style={{width:"14px",height:"2.5px",background:LINE_COLORS[i%LINE_COLORS.length],borderRadius:"1px"}}/>
+            <span style={{fontSize:"11px",color:"#636366"}}>{getRatId(s)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function App(){
+  const[sessions,setSessions]=useState([]);
+  const[fileNames,setFileNames]=useState([]);
+  const[dragging,setDragging]=useState(false);
+  const[sessionType,setSessionType]=useState(null);
+  const[autoType,setAutoType]=useState(null);
+  const[rewardArr,setRewardArr]=useState("V");
+  const[activeArr,setActiveArr]=useState("Y");
+  const[inactiveArr,setInactiveArr]=useState("U");
+  const[rewardScalar,setRewardScalar]=useState("B");
+  const[activeScalar,setActiveScalar]=useState("G");
+  const[inactiveScalar,setInactiveScalar]=useState("A");
+  const[breakpointArr,setBreakpointArr]=useState("S");
+  const[shockAtArr,setShockAtArr]=useState("M");
+  const[totalShocksArr,setTotalShocksArr]=useState("T");
+  const[binMin,setBinMin]=useState(5);
+  const[vizBinMin,setVizBinMin]=useState(10);
+  const[sesMin,setSesMin]=useState(360);
+  const[autoDetected,setAutoDetected]=useState(false);
+  const[tsMatrix,setTsMatrix]=useState(null);
+  const[binMatrix,setBinMatrix]=useState(null);
+  const[computing,setComputing]=useState(false);
+  const[done,setDone]=useState(false);
+  const fileRef=useRef();
+
+  const handleFiles=useCallback((incoming)=>{
+    const all=[];let loaded=0;const fArr=[...incoming];
+    setFileNames(fArr.map(f=>f.name));
+    setDone(false);setTsMatrix(null);setBinMatrix(null);setAutoDetected(false);
+    fArr.forEach(f=>{
+      const r=new FileReader();
+      r.onload=e=>{
+        try{all.push(...parseMedFile(e.target.result,f.name));}catch(_){}
+        loaded++;
+        if(loaded===fArr.length){
+          setSessions(all);
+          const det=detectSessionDuration(all);
+          if(det){setSesMin(det);setAutoDetected(true);}
+          const detected=detectSessionType(fArr[0].name);
+          setAutoType(detected);setSessionType(detected);
+        }
+      };
+      r.readAsText(f);
+    });
+  },[]);
+
+  const detectedArrays=[...new Set(sessions.flatMap(s=>Object.keys(s.arrays)))].sort();
+  const arrOpts=[...new Set([...ARRAYS_DEFAULT,...detectedArrays])];
+  const nBins=Math.ceil(Number(sesMin)/Number(binMin));
+  const nAnimals=sessions.length;
+  const effectiveType=sessionType||"FR";
+  const canCompute=sessions.length>0&&!computing;
+  const ST=SESSION_TYPES[effectiveType]||SESSION_TYPES.FR;
+
+  const sessionDate=sessions[0]?.meta["Start Date"]||null;
+  const msnList=[...new Set(sessions.map(s=>s.meta["MSN"]).filter(Boolean))];
+  const startTime=sessions[0]?.meta["Start Time"]||null;
+  const endTime=sessions[0]?.meta["End Time"]||null;
+  const subjectList=sessions.map(s=>getRatId(s));
+
+  const compute=()=>{
+    setComputing(true);
+    const cfg={rewardArray:rewardArr,activeArray:activeArr,inactiveArray:inactiveArr,
+      rewardScalarArray:rewardScalar,activeScalarArray:activeScalar,inactiveScalarArray:inactiveScalar,
+      breakpointArray:breakpointArr,shockAtRewardArray:shockAtArr,totalShocksArray:totalShocksArr};
+    setTimeout(()=>{
+      setTsMatrix(buildTimestampMatrix(sessions,cfg,effectiveType));
+      setBinMatrix(buildBinsMatrix(sessions,cfg,effectiveType,+binMin,+sesMin));
+      setComputing(false);setDone(true);
+    },50);
+  };
+
+  const card={background:"#fff",border:"1px solid #e5e5ea",borderRadius:"12px",overflow:"hidden",marginBottom:"10px"};
+  const secHead=(bg,color)=>({padding:"9px 14px",background:bg||"#f5f5f7",borderBottom:"1px solid #e5e5ea",fontSize:"11px",fontWeight:600,color:color||"#636366",textTransform:"uppercase",letterSpacing:"0.06em"});
+  const rowStyle={display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 14px"};
+  const inp={fontSize:"14px",padding:"5px 10px",borderRadius:"8px",width:"72px",border:"1px solid #d1d1d6",background:"#f5f5f7",color:"#1d1d1f",textAlign:"right"};
+  const sel={fontSize:"14px",padding:"5px 28px 5px 10px",borderRadius:"8px",border:"1px solid #d1d1d6",background:"#f5f5f7",color:"#1d1d1f",minWidth:"64px",appearance:"none",backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 8px center"};
+
+  const Lbl=({main,hint})=><div><p style={{margin:0,fontSize:"14px",color:"#1d1d1f"}}>{main}</p>{hint&&<p style={{margin:0,fontSize:"12px",color:"#8e8e93",marginTop:"1px"}}>{hint}</p>}</div>;
+  const Dot=({color})=><div style={{width:"7px",height:"7px",borderRadius:"50%",background:color,flexShrink:0}}/>;
+  const ASelect=({value,onChange,opts})=><select value={value} onChange={e=>onChange(e.target.value)} style={sel}>{opts.map(a=><option key={a}>{a}</option>)}</select>;
+  const AInput=({value,onChange})=><input type="number" min="1" value={value} onChange={e=>onChange(e.target.value)} style={inp}/>;
+
+  return(
+    <div style={{paddingBottom:"2rem"}}>
+      <div style={{padding:"1.25rem 0 1rem",display:"flex",alignItems:"center",gap:"12px"}}>
+        <div style={{width:"36px",height:"36px",borderRadius:"10px",background:"#E1F5EE",border:"1px solid #9FE1CB",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none"><path d="M2 12V5l6-3 6 3v7" stroke="#085041" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/><rect x="5" y="8" width="6" height="4" rx="0.5" stroke="#085041" strokeWidth="1.3"/></svg>
+        </div>
+        <div>
+          <p style={{margin:0,fontSize:"17px",fontWeight:600,color:"#1d1d1f"}}>MedAssociate parser</p>
+          <p style={{margin:0,fontSize:"12px",color:"#8e8e93"}}>George Lab · one file per session day · multiple rats per file</p>
+        </div>
+      </div>
+
+      {/* Drop zone */}
+      <div onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)}
+        onDrop={e=>{e.preventDefault();setDragging(false);handleFiles(e.dataTransfer.files);}}
+        onClick={()=>fileRef.current.click()}
+        style={{border:`2px dashed ${dragging?"#185FA5":"#c7c7cc"}`,borderRadius:"12px",padding:"22px 16px",textAlign:"center",cursor:"pointer",background:sessions.length>0?"#fff":"#f5f5f7",marginBottom:"12px"}}>
+        {sessions.length>0?(
+          <div style={{display:"flex",alignItems:"center",gap:"12px",textAlign:"left"}}>
+            <div style={{width:"36px",height:"36px",borderRadius:"10px",background:"#E1F5EE",border:"1px solid #9FE1CB",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M4 9.5L7.5 13L14 6" stroke="#085041" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <p style={{margin:0,fontSize:"14px",fontWeight:500,color:"#1d1d1f"}}>{fileNames.length} file{fileNames.length!==1?"s":""} · {nAnimals} rat sessions parsed</p>
+              <p style={{margin:0,fontSize:"12px",color:"#8e8e93",marginTop:"2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{fileNames.join(", ")}</p>
+            </div>
+            <button onClick={e=>{e.stopPropagation();setSessions([]);setFileNames([]);setDone(false);setTsMatrix(null);setBinMatrix(null);setAutoType(null);setSessionType(null);}} style={{fontSize:"12px",padding:"4px 10px",color:"#636366",background:"transparent",border:"1px solid #d1d1d6",borderRadius:"6px"}}>Clear</button>
+          </div>
+        ):(
+          <>
+            <div style={{width:"36px",height:"36px",margin:"0 auto 10px",borderRadius:"10px",background:"#fff",border:"1px solid #d1d1d6",display:"flex",alignItems:"center",justifyContent:"center"}}>
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 12V4M9 4L6 7M9 4L12 7" stroke="#636366" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/><path d="M3 15H15" stroke="#636366" strokeWidth="1.3" strokeLinecap="round"/></svg>
+            </div>
+            <p style={{fontSize:"14px",fontWeight:500,margin:"0 0 3px",color:"#1d1d1f"}}>Upload raw Med-PC files</p>
+            <p style={{fontSize:"12px",color:"#8e8e93",margin:0}}>Drag and drop or click · multiple files supported</p>
+          </>
+        )}
+      </div>
+      <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>handleFiles(e.target.files)}/>
+
+      {/* Session type */}
+      <div style={{...card,border:`1px solid ${ST.border}`}}>
+        <div style={secHead(ST.bg,ST.text)}>Session type</div>
+        <div style={{padding:"12px 14px",background:ST.bg+"55",borderBottom:"1px solid #e5e5ea",display:"flex",gap:"8px",flexWrap:"wrap"}}>
+          {Object.entries(SESSION_TYPES).map(([key,val])=>(
+            <button key={key} onClick={()=>setSessionType(key)} style={{fontSize:"13px",padding:"7px 16px",borderRadius:"9px",border:sessionType===key?`2px solid ${val.color}`:"1px solid #d1d1d6",background:sessionType===key?val.bg:"#fff",color:sessionType===key?val.text:"#636366",fontWeight:sessionType===key?600:400}}>
+              {key}{autoType===key&&sessionType===key&&<span style={{marginLeft:"6px",fontSize:"10px",padding:"1px 5px",background:val.color+"33",borderRadius:"4px",color:val.color,fontWeight:600}}>auto</span>}
+            </button>
+          ))}
+        </div>
+        <div style={{padding:"10px 14px"}}>
+          <p style={{margin:0,fontSize:"13px",color:"#636366"}}><span style={{fontWeight:500,color:ST.color}}>{ST.label}</span>{sessionType==="PR"&&<span style={{color:"#8e8e93"}}> · exports PR breakpoint</span>}{sessionType==="SHOCK"&&<span style={{color:"#8e8e93"}}> · exports shock info</span>}</p>
+        </div>
+      </div>
+
+      {/* Session info */}
+      {sessions.length>0&&(
+        <div style={{...card,border:"1px solid #9FE1CB"}}>
+          <div style={secHead("#E1F5EE","#085041")}>Session info</div>
+          {sessionDate&&<div style={{...rowStyle,borderBottom:"1px solid #e5e5ea"}}><Lbl main="Date"/><span style={{fontSize:"13px",color:"#636366"}}>{sessionDate}</span></div>}
+          {startTime&&endTime&&<div style={{...rowStyle,borderBottom:"1px solid #e5e5ea"}}><Lbl main="Time window"/><span style={{fontSize:"13px",color:"#636366"}}>{startTime} – {endTime}</span></div>}
+          {msnList.length>0&&<div style={{...rowStyle,borderBottom:"1px solid #e5e5ea"}}><Lbl main="Program (MSN)"/><span style={{fontSize:"13px",color:"#636366"}}>{msnList.join(", ")}</span></div>}
+          <div style={{...rowStyle,borderBottom:"1px solid #e5e5ea"}}><Lbl main="Arrays detected"/><span style={{fontSize:"13px",color:"#636366"}}>{detectedArrays.join(", ")||"—"}</span></div>
+          <div style={{...rowStyle}}><Lbl main="Rat IDs" hint={`${subjectList.length} subjects`}/>
+            <div style={{display:"flex",flexWrap:"wrap",gap:"4px",justifyContent:"flex-end",maxWidth:"300px"}}>
+              {subjectList.map((s,i)=><span key={i} style={{fontSize:"11px",padding:"2px 8px",background:LINE_COLORS[i%LINE_COLORS.length]+"22",border:`1px solid ${LINE_COLORS[i%LINE_COLORS.length]}55`,borderRadius:"6px",color:"#1d1d1f"}}>{s}</span>)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Chart */}
+      {sessions.length>0&&(
+        <div style={{...card,border:"1px solid #9FE1CB"}}>
+          <div style={secHead("#E1F5EE","#085041")}>Rewards per bin — live preview</div>
+          <div style={{padding:"10px 14px",background:"#E1F5EE55",borderBottom:"1px solid #e5e5ea",display:"flex",alignItems:"center",gap:"10px",flexWrap:"wrap"}}>
+            <Lbl main="Chart bin"/>
+            <div style={{display:"flex",alignItems:"center",gap:"6px"}}><AInput value={vizBinMin} onChange={setVizBinMin}/><span style={{fontSize:"13px",color:"#8e8e93"}}>min</span></div>
+            <div style={{display:"flex",gap:"5px",flexWrap:"wrap"}}>
+              {[5,10,15,30,60].map(v=><button key={v} onClick={()=>setVizBinMin(v)} style={{fontSize:"11px",padding:"3px 10px",borderRadius:"7px",border:+vizBinMin===v?"2px solid #185FA5":"1px solid #d1d1d6",background:+vizBinMin===v?"#E6F1FB":"#fff",color:+vizBinMin===v?"#0C447C":"#636366"}}>{v}m</button>)}
+            </div>
+          </div>
+          <div style={{padding:"12px 4px 4px"}}><RewardChart sessions={sessions} rewardArray={rewardArr} sesMin={sesMin} vizBinMin={vizBinMin}/></div>
+        </div>
+      )}
+
+      {/* Array mapping */}
+      <div style={{...card,border:"1px solid #B5D4F4"}}>
+        <div style={secHead("#E6F1FB","#0C447C")}>Array mapping</div>
+        <div style={{padding:"8px 14px",background:"#E6F1FB44",borderBottom:"1px solid #e5e5ea"}}><p style={{margin:0,fontSize:"11px",fontWeight:600,color:"#0C447C",textTransform:"uppercase",letterSpacing:"0.05em"}}>Timestamp arrays</p></div>
+        {[["Reward timestamps",rewardArr,setRewardArr,"#1D9E75"],["Active presses",activeArr,setActiveArr,"#185FA5"],["Inactive presses",inactiveArr,setInactiveArr,"#5F5E5A"]].map(([lbl,val,set,color],idx,arr)=>(
+          <div key={lbl} style={{...rowStyle,background:idx%2===0?"#f5f5f7":"#fff",borderBottom:idx<arr.length-1||effectiveType!=="FR"?"1px solid #e5e5ea":"none"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"10px"}}><Dot color={color}/><Lbl main={lbl}/></div>
+            <ASelect value={val} onChange={set} opts={arrOpts}/>
+          </div>
+        ))}
+        <div style={{padding:"8px 14px",background:"#FAEEDA88",borderTop:"1px solid #e5e5ea",borderBottom:"1px solid #e5e5ea"}}><p style={{margin:0,fontSize:"11px",fontWeight:600,color:"#633806",textTransform:"uppercase",letterSpacing:"0.05em"}}>Scalar arrays — element [0] = session total</p></div>
+        {[["Total rewards",rewardScalar,setRewardScalar,"#BA7517"],["Total active",activeScalar,setActiveScalar,"#185FA5"],["Total inactive",inactiveScalar,setInactiveScalar,"#5F5E5A"]].map(([lbl,val,set,color],idx)=>(
+          <div key={lbl} style={{...rowStyle,background:idx%2===0?"#FAEEDA33":"#fff",borderBottom:idx<2||effectiveType!=="FR"?"1px solid #e5e5ea":"none"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"10px"}}><Dot color={color}/><Lbl main={lbl}/></div>
+            <ASelect value={val} onChange={set} opts={arrOpts}/>
+          </div>
+        ))}
+        {effectiveType==="PR"&&<>
+          <div style={{padding:"8px 14px",background:"#E6F1FB66",borderTop:"1px solid #e5e5ea",borderBottom:"1px solid #e5e5ea"}}><p style={{margin:0,fontSize:"11px",fontWeight:600,color:"#0C447C",textTransform:"uppercase",letterSpacing:"0.05em"}}>Progressive ratio</p></div>
+          <div style={{...rowStyle,background:"#f5f5f7"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"10px"}}><Dot color="#185FA5"/><Lbl main="PR breakpoint (last ratio)" hint="Scalar array S[0]"/></div>
+            <ASelect value={breakpointArr} onChange={setBreakpointArr} opts={arrOpts}/>
+          </div>
+        </>}
+        {effectiveType==="SHOCK"&&<>
+          <div style={{padding:"8px 14px",background:"#FAECE788",borderTop:"1px solid #e5e5ea",borderBottom:"1px solid #e5e5ea"}}><p style={{margin:0,fontSize:"11px",fontWeight:600,color:"#4A1B0C",textTransform:"uppercase",letterSpacing:"0.05em"}}>Shock arrays</p></div>
+          <div style={{...rowStyle,background:"#FAECE733",borderBottom:"1px solid #e5e5ea"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"10px"}}><Dot color="#D85A30"/><Lbl main="Shock at reward # (timestamps)" hint="Array M"/></div>
+            <ASelect value={shockAtArr} onChange={setShockAtArr} opts={arrOpts}/>
+          </div>
+          <div style={{...rowStyle,background:"#fff"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"10px"}}><Dot color="#D85A30"/><Lbl main="Total shocks (scalar)" hint="Array T[0]"/></div>
+            <ASelect value={totalShocksArr} onChange={setTotalShocksArr} opts={arrOpts}/>
+          </div>
+        </>}
+      </div>
+
+      {/* Bin settings */}
+      <div style={{...card,border:"1px solid #B5D4F4"}}>
+        <div style={secHead("#E6F1FB","#0C447C")}>Bin settings for CSV export</div>
+        <div style={{...rowStyle,background:"#f5f5f7",borderBottom:"1px solid #e5e5ea"}}><Lbl main="Bin size" hint="Duration of each time bin"/>
+          <div style={{display:"flex",alignItems:"center",gap:"6px"}}><AInput value={binMin} onChange={setBinMin}/><span style={{fontSize:"13px",color:"#8e8e93"}}>min</span></div>
+        </div>
+        <div style={{...rowStyle,borderBottom:"1px solid #e5e5ea"}}><Lbl main="Session duration" hint={autoDetected?"Auto-detected from file":"Set manually"}/>
+          <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+            {autoDetected&&<span style={{fontSize:"11px",padding:"2px 7px",background:"#E1F5EE",borderRadius:"6px",color:"#085041",fontWeight:600,border:"1px solid #9FE1CB"}}>auto</span>}
+            <AInput value={sesMin} onChange={v=>{setSesMin(v);setAutoDetected(false);}}/><span style={{fontSize:"13px",color:"#8e8e93"}}>min</span>
+          </div>
+        </div>
+        <div style={{padding:"10px 14px",borderBottom:"1px solid #e5e5ea",background:"#f5f5f7",display:"flex",gap:"6px",flexWrap:"wrap"}}>
+          {[[30,"30 min"],[120,"2 h"],[360,"6 h"],[1260,"21 h"]].map(([v,lbl])=>(
+            <button key={v} onClick={()=>{setSesMin(v);setAutoDetected(false);}} style={{fontSize:"12px",padding:"5px 14px",borderRadius:"8px",border:+sesMin===v?"2px solid #185FA5":"1px solid #d1d1d6",background:+sesMin===v?"#E6F1FB":"#fff",color:+sesMin===v?"#0C447C":"#636366"}}>{lbl}</button>
+          ))}
+        </div>
+        <div style={{padding:"9px 14px",background:"#E6F1FB55",display:"flex",gap:"20px"}}>
+          <span style={{fontSize:"13px",color:"#636366"}}><strong style={{color:"#1d1d1f",fontWeight:600}}>{nBins}</strong> bins</span>
+          <span style={{fontSize:"13px",color:"#636366"}}><strong style={{color:"#1d1d1f",fontWeight:600}}>{binMin} min</strong> each</span>
+          <span style={{fontSize:"13px",color:"#636366"}}><strong style={{color:"#1d1d1f",fontWeight:600}}>{formatDur(+sesMin)}</strong> total</span>
+        </div>
+      </div>
+
+      <button onClick={compute} disabled={!canCompute} style={{width:"100%",padding:"13px",fontSize:"15px",fontWeight:600,borderRadius:"12px",border:"none",background:canCompute?ST.color:"#e5e5ea",color:canCompute?"#fff":"#8e8e93",marginBottom:"16px"}}>
+        {computing?"Processing…":canCompute?`Generate CSV files · ${effectiveType} session · ${nAnimals} rats`:"Upload files to begin"}
+      </button>
+
+      {done&&tsMatrix&&binMatrix&&<>
+        <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"10px"}}>
+          <div style={{flex:1,height:"1px",background:"#e5e5ea"}}/>
+          <span style={{fontSize:"11px",fontWeight:600,color:"#8e8e93",textTransform:"uppercase",letterSpacing:"0.06em"}}>Output files</span>
+          <div style={{flex:1,height:"1px",background:"#e5e5ea"}}/>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:"8px",marginBottom:"12px"}}>
+          {[["Rats",nAnimals,"#E1F5EE","#085041"],["Timestamp rows",tsMatrix.length-1,"#E6F1FB","#0C447C"],["Bin columns",nBins*3,"#EEEDFE","#534AB7"]].map(([lbl,val,bg,tc])=>(
+            <div key={lbl} style={{background:bg,borderRadius:"10px",padding:"10px 12px"}}>
+              <p style={{margin:0,fontSize:"11px",color:tc,textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:600,opacity:0.8}}>{lbl}</p>
+              <p style={{margin:"3px 0 0",fontSize:"22px",fontWeight:600,color:tc}}>{val}</p>
+            </div>
+          ))}
+        </div>
+        {[
+          {title:"Timestamps matrix",sub:`Rows = variables · Columns = rats · ${effectiveType}`,dot:"#1D9E75",bg:"#E1F5EE",tc:"#085041",border:"#9FE1CB",matrix:tsMatrix,name:`timestamps_${effectiveType.toLowerCase()}.csv`},
+          {title:"Binned data",sub:`Rows = rats · ${nBins} bins × 3 vars · ${effectiveType}`,dot:"#185FA5",bg:"#E6F1FB",tc:"#0C447C",border:"#B5D4F4",matrix:binMatrix,name:`binned_data_${effectiveType.toLowerCase()}.csv`},
+        ].map(({title,sub,dot,bg,tc,border,matrix,name})=>(
+          <div key={name} style={{...card,border:`1px solid ${border}`,marginBottom:"10px"}}>
+            <div style={{padding:"12px 14px",background:bg+"66",display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:"1px solid #e5e5ea"}}>
+              <div style={{display:"flex",alignItems:"center",gap:"10px"}}>
+                <div style={{width:"8px",height:"8px",borderRadius:"50%",background:dot,flexShrink:0}}/>
+                <div><p style={{margin:0,fontSize:"14px",fontWeight:500,color:"#1d1d1f"}}>{title}</p><p style={{margin:0,fontSize:"12px",color:"#8e8e93"}}>{sub}</p></div>
+              </div>
+              <button onClick={()=>triggerDownload(toCSV(matrix),name)} style={{fontSize:"13px",padding:"7px 16px",borderRadius:"8px",border:`1px solid ${border}`,background:bg,color:tc,fontWeight:600}}>{`Download CSV`}</button>
+            </div>
+            <div style={{background:"#f5f5f7",padding:"5px 14px",borderBottom:"1px solid #e5e5ea"}}><span style={{fontSize:"11px",color:"#8e8e93"}}>{matrix.length-1} rows × {matrix[0].length} columns</span></div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{borderCollapse:"collapse",fontSize:"11px",width:"100%",tableLayout:"fixed"}}>
+                <thead><tr style={{background:"#f5f5f7"}}>
+                  {matrix[0].slice(0,7).map((c,j)=><th key={j} style={{padding:"6px 10px",textAlign:"left",fontWeight:600,color:"#636366",borderBottom:"1px solid #e5e5ea",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"110px"}}>{c}</th>)}
+                  {matrix[0].length>7&&<th style={{padding:"6px 8px",color:"#8e8e93",fontWeight:400,fontSize:"10px",borderBottom:"1px solid #e5e5ea"}}>+{matrix[0].length-7} more</th>}
+                </tr></thead>
+                <tbody>
+                  {matrix.slice(1,6).map((row,i)=>(
+                    <tr key={i} style={{background:i%2===0?"#fff":"#f5f5f7",borderBottom:"1px solid #e5e5ea"}}>
+                      {row.slice(0,7).map((v,j)=><td key={j} style={{padding:"6px 10px",color:"#636366",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"110px"}}>{String(v)}</td>)}
+                      {row.length>7&&<td style={{padding:"6px 8px",color:"#8e8e93"}}>…</td>}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p style={{fontSize:"11px",color:"#8e8e93",padding:"6px 10px",margin:0}}>{matrix.length-1} rows total · preview shows first 5</p>
+            </div>
+          </div>
+        ))}
+      </>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
